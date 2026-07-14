@@ -1,7 +1,9 @@
 import ctypes
 import copy
+import os
 import re
 import sys
+import tempfile
 from calendar import monthrange
 from datetime import date
 from pathlib import Path
@@ -17,7 +19,20 @@ except ModuleNotFoundError:
     ttk = None
 
 
-BASE_DIR = Path(__file__).resolve().parent
+SOURCE_DIR = Path(__file__).resolve().parent
+RUNTIME_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else SOURCE_DIR
+
+
+def find_workspace_dir(start_dir):
+    for candidate in (start_dir, *start_dir.parents):
+        if (candidate / ".git").is_dir() and (candidate / "hotel_manager.py").is_file():
+            return candidate
+    return start_dir
+
+
+WORKSPACE_DIR = find_workspace_dir(RUNTIME_DIR)
+BASE_DIR = WORKSPACE_DIR / "data"
+LEGACY_DATA_DIRS = tuple(dict.fromkeys((RUNTIME_DIR, SOURCE_DIR, WORKSPACE_DIR)))
 RECORD_FILE_PREFIX = "hotel_stay_records"
 DEFAULT_YEAR = "2025"
 CURRENT_YEAR = str(date.today().year)
@@ -78,11 +93,66 @@ BASE_COLUMN_LAYOUT = {
 }
 
 
+def backup_file_for(path):
+    return path.with_suffix(path.suffix + ".bak")
+
+
+def write_bytes_atomically(path, content):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_file.write(content)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+            temporary_path = Path(temporary_file.name)
+        os.replace(temporary_path, path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def write_text_atomically(path, content, create_backup=True):
+    if create_backup and path.exists():
+        write_bytes_atomically(backup_file_for(path), path.read_bytes())
+    write_bytes_atomically(path, content.encode("utf-8"))
+
+
+def initialize_data_storage():
+    BASE_DIR.mkdir(parents=True, exist_ok=True)
+    for legacy_dir in LEGACY_DATA_DIRS:
+        if legacy_dir.resolve() == BASE_DIR.resolve() or not legacy_dir.exists():
+            continue
+
+        legacy_files = sorted(legacy_dir.glob(f"{RECORD_FILE_PREFIX}_*.md"))
+        unsuffixed_file = legacy_dir / f"{RECORD_FILE_PREFIX}.md"
+        if unsuffixed_file.exists():
+            legacy_files.insert(0, unsuffixed_file)
+
+        for legacy_file in legacy_files:
+            target_name = (
+                f"{RECORD_FILE_PREFIX}_{DEFAULT_YEAR}.md"
+                if legacy_file == unsuffixed_file
+                else legacy_file.name
+            )
+            target_file = BASE_DIR / target_name
+            if not target_file.exists():
+                write_bytes_atomically(target_file, legacy_file.read_bytes())
+
+
 def record_file_for_year(year):
     return BASE_DIR / f"{RECORD_FILE_PREFIX}_{year}.md"
 
 
 def discover_record_years():
+    initialize_data_storage()
     discovered_years = {
         match.group(1)
         for path in BASE_DIR.glob(f"{RECORD_FILE_PREFIX}_*.md")
@@ -112,16 +182,19 @@ def enable_high_dpi():
 
 
 def init_md_file(year=DEFAULT_YEAR):
+    initialize_data_storage()
     md_file = current_md_file(year)
     legacy_file = BASE_DIR / f"{RECORD_FILE_PREFIX}.md"
     if not md_file.exists() and year == DEFAULT_YEAR and legacy_file.exists():
-        legacy_file.replace(md_file)
+        write_bytes_atomically(md_file, legacy_file.read_bytes())
 
     if not md_file.exists() or md_file.stat().st_size == 0:
-        with md_file.open("w", encoding="utf-8", newline="\n") as f:
-            f.write("# 酒店住宿记录\n\n")
-            f.write("| " + " | ".join(HEADERS) + " |\n")
-            f.write("| " + " | ".join([":---"] * len(HEADERS)) + " |\n")
+        initial_content = (
+            "# 酒店住宿记录\n\n"
+            + "| " + " | ".join(HEADERS) + " |\n"
+            + "| " + " | ".join([":---"] * len(HEADERS)) + " |\n"
+        )
+        write_text_atomically(md_file, initial_content, create_backup=False)
         return
 
     migrate_md_columns(year)
@@ -190,7 +263,7 @@ def migrate_md_columns(year=DEFAULT_YEAR):
         migrated_lines.append(line)
 
     if changed:
-        md_file.write_text("\n".join(migrated_lines) + "\n", encoding="utf-8", newline="\n")
+        write_text_atomically(md_file, "\n".join(migrated_lines) + "\n")
 
 
 
@@ -198,15 +271,6 @@ def clean_markdown_cell(value):
     value = value.strip()
     value = re.sub(r"\s+", " ", value)
     return value.replace("|", "｜")
-
-
-def normalize_nights(value):
-    value = clean_markdown_cell(value)
-    if not value:
-        return value
-    if value.isdigit():
-        return f"{value}间夜"
-    return value
 
 
 def parse_month_day(value):
@@ -227,6 +291,18 @@ def parse_stay_date_range(value):
     start_month, start_day = (int(part) for part in start_text.split(".", 1))
     end_month, end_day = (int(part) for part in end_text.split(".", 1))
     return start_month, start_day, end_month, end_day
+
+
+def stay_date_sort_key(record):
+    parsed = parse_stay_date_range(record.get("入住时间", ""))
+    if parsed is None:
+        return 13, 32
+    start_month, start_day, _, _ = parsed
+    return start_month, start_day
+
+
+def sort_records_by_checkin(records):
+    return sorted(records, key=stay_date_sort_key)
 
 
 def is_valid_month_day(month, day):
@@ -306,12 +382,12 @@ def validate_record(record):
 
 
 def parse_markdown_records(year=DEFAULT_YEAR):
-    init_md_file(year)
     records = []
     malformed_count = 0
     source_headers = HEADERS
 
     try:
+        init_md_file(year)
         lines = current_md_file(year).read_text(encoding="utf-8").splitlines()
     except OSError as exc:
         raise RuntimeError(f"读取文件失败: {exc}") from exc
@@ -336,7 +412,7 @@ def parse_markdown_records(year=DEFAULT_YEAR):
             continue
         records.append(dict(zip(HEADERS, cells)))
 
-    return records, malformed_count
+    return sort_records_by_checkin(records), malformed_count
 
 
 def write_markdown_records(records, year=DEFAULT_YEAR):
@@ -346,9 +422,9 @@ def write_markdown_records(records, year=DEFAULT_YEAR):
         "| " + " | ".join(HEADERS) + " |",
         "| " + " | ".join([":---"] * len(HEADERS)) + " |",
     ]
-    for record in records:
+    for record in sort_records_by_checkin(records):
         lines.append("| " + " | ".join(record.get(header, "") for header in HEADERS) + " |")
-    current_md_file(year).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    write_text_atomically(current_md_file(year), "\n".join(lines) + "\n")
 
 
 def has_duplicate_record(records, record, exclude_index=None):
@@ -411,6 +487,17 @@ class HotelManagerApp:
             messagebox.showerror("错误", message)
             return False
         return True
+
+    def ensure_records_writable(self, malformed_count):
+        if not malformed_count:
+            return True
+        message = (
+            f"检测到数据文件中有 {malformed_count} 行格式异常。\n\n"
+            "为防止异常内容被覆盖，本次操作已取消。请先备份并修复数据文件，然后重试。"
+        )
+        self.set_status("检测到格式异常，本次保存已取消。", "warning")
+        messagebox.showwarning("数据文件需要修复", message)
+        return False
 
     def refresh_table(self):
         for item_id in self.record_table.get_children():
@@ -606,7 +693,9 @@ class HotelManagerApp:
         loaded = self.load_records()
         if loaded is None:
             return
-        records, _ = loaded
+        records, malformed_count = loaded
+        if not self.ensure_records_writable(malformed_count):
+            return
         if not self.confirm_duplicate(records, record):
             return
 
@@ -634,7 +723,9 @@ class HotelManagerApp:
         loaded = self.load_records()
         if loaded is None:
             return
-        records, _ = loaded
+        records, malformed_count = loaded
+        if not self.ensure_records_writable(malformed_count):
+            return
 
         if self.editing_index < 0 or self.editing_index >= len(records):
             message = "选中的记录已经不存在，请重新选择。"
@@ -648,10 +739,13 @@ class HotelManagerApp:
             return
 
         records[self.editing_index] = record
+        records = sort_records_by_checkin(records)
+        saved_index = next(
+            index for index, saved_record in enumerate(records) if saved_record is record
+        )
         if not self.save_records(records):
             return
 
-        saved_index = self.editing_index
         self.refresh_table()
         item_ids = self.record_table.get_children()
         if saved_index < len(item_ids):
@@ -669,7 +763,9 @@ class HotelManagerApp:
         loaded = self.load_records()
         if loaded is None:
             return
-        records, _ = loaded
+        records, malformed_count = loaded
+        if not self.ensure_records_writable(malformed_count):
+            return
         if self.editing_index < 0 or self.editing_index >= len(records):
             message = "选中的记录已经不存在，请重新选择。"
             self.set_status(message, "warning")
@@ -1108,6 +1204,12 @@ def main():
         raise RuntimeError("当前 Python 环境缺少 tkinter，无法启动图形界面。")
     enable_high_dpi()
     root = tk.Tk()
+    try:
+        initialize_data_storage()
+    except OSError as exc:
+        messagebox.showerror("数据目录错误", f"无法初始化数据目录: {exc}", parent=root)
+        root.destroy()
+        return None
     app = HotelManagerApp(root)
     root.mainloop()
     return app
