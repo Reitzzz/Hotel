@@ -32,12 +32,16 @@ def find_workspace_dir(start_dir):
 
 WORKSPACE_DIR = find_workspace_dir(RUNTIME_DIR)
 BASE_DIR = WORKSPACE_DIR / "data"
+AUTO_BACKUP_DIR = WORKSPACE_DIR / "data_backups" / "autosave"
 LEGACY_DATA_DIRS = tuple(dict.fromkeys((RUNTIME_DIR, SOURCE_DIR, WORKSPACE_DIR)))
 RECORD_FILE_PREFIX = "hotel_stay_records"
 DEFAULT_YEAR = "2025"
+FIRST_RECORD_YEAR = "2024"
 CURRENT_YEAR = str(date.today().year)
 
-HEADERS = ["名称", "入住时间", "间夜", "房型", "总价", "积分", "备注"]
+HEADERS = ["名称", "入住时间", "间夜", "房型", "总价", "积分", "开业信息", "版本", "备注"]
+PREVIOUS_HEADERS = ["名称", "入住时间", "间夜", "房型", "总价", "积分", "开业信息", "备注"]
+LEGACY_HEADERS = ["名称", "入住时间", "间夜", "房型", "总价", "积分", "备注"]
 OLD_HEADERS = ["酒店名称", "日期", "间夜", "房型", "费用1", "费用2 / 报销", "备注"]
 AVG_HEADERS = ["名称", "入住时间", "间夜", "房型", "总价", "均价", "积分", "备注"]
 DATE_PART_RE = re.compile(r"^\d{1,2}\.\d{1,2}$")
@@ -89,12 +93,14 @@ BASE_COLUMN_LAYOUT = {
     "房型": {"weight": 0.85, "min": 105, "max": 170, "anchor": "center"},
     "总价": {"weight": 0.7, "min": 64, "max": 92, "anchor": "center"},
     "积分": {"weight": 1.35, "min": 135, "max": 210, "anchor": "center"},
+    "开业信息": {"weight": 1.2, "min": 120, "max": 210, "anchor": "center"},
+    "版本": {"weight": 0.7, "min": 72, "max": 120, "anchor": "center"},
     "备注": {"weight": 1.35, "min": 120, "max": 210, "anchor": "center"},
 }
 
 
 def backup_file_for(path):
-    return path.with_suffix(path.suffix + ".bak")
+    return AUTO_BACKUP_DIR / path.with_suffix(path.suffix + ".bak").name
 
 
 def write_bytes_atomically(path, content):
@@ -127,6 +133,17 @@ def write_text_atomically(path, content, create_backup=True):
 
 def initialize_data_storage():
     BASE_DIR.mkdir(parents=True, exist_ok=True)
+    AUTO_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+
+    for legacy_backup_file in BASE_DIR.glob(f"{RECORD_FILE_PREFIX}_*.md.bak"):
+        backup_file = AUTO_BACKUP_DIR / legacy_backup_file.name
+        if (
+            not backup_file.exists()
+            or legacy_backup_file.stat().st_mtime > backup_file.stat().st_mtime
+        ):
+            write_bytes_atomically(backup_file, legacy_backup_file.read_bytes())
+        legacy_backup_file.unlink()
+
     for legacy_dir in LEGACY_DATA_DIRS:
         if legacy_dir.resolve() == BASE_DIR.resolve() or not legacy_dir.exists():
             continue
@@ -158,7 +175,7 @@ def discover_record_years():
         for path in BASE_DIR.glob(f"{RECORD_FILE_PREFIX}_*.md")
         if (match := re.fullmatch(rf"{RECORD_FILE_PREFIX}_(\d{{4}})\.md", path.name))
     }
-    first_year = int(DEFAULT_YEAR)
+    first_year = int(FIRST_RECORD_YEAR)
     candidate_years = {int(CURRENT_YEAR), first_year}
     candidate_years.update(int(year) for year in discovered_years)
     last_year = max(candidate_years)
@@ -211,11 +228,19 @@ def split_points_and_note(cells):
     return cells
 
 
-def normalize_record_cells(cells, source_headers=None):
-    if source_headers == OLD_HEADERS:
-        cells = cells[:]
-    elif source_headers == AVG_HEADERS or len(cells) == len(AVG_HEADERS):
+def normalize_record_cells(cells, source_headers=None, year=DEFAULT_YEAR):
+    cells = cells[:]
+    if source_headers == AVG_HEADERS:
         cells = cells[:5] + cells[6:]
+
+    if source_headers != HEADERS and len(cells) == len(LEGACY_HEADERS):
+        note = cells[-1]
+        opening_info = note if str(year) == FIRST_RECORD_YEAR else ""
+        cells = cells[:-1] + [opening_info, "" if opening_info else note]
+
+    if source_headers != HEADERS and len(cells) == len(PREVIOUS_HEADERS):
+        cells = cells[:-1] + ["", cells[-1]]
+
     return split_points_and_note(cells)
 
 
@@ -236,7 +261,7 @@ def migrate_md_columns(year=DEFAULT_YEAR):
         stripped = line.strip()
         if stripped.startswith("|") and not table_header_seen:
             cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-            if cells in (OLD_HEADERS, HEADERS, AVG_HEADERS):
+            if cells in (OLD_HEADERS, LEGACY_HEADERS, PREVIOUS_HEADERS, HEADERS, AVG_HEADERS):
                 migrated_lines.append("| " + " | ".join(HEADERS) + " |")
                 table_header_seen = True
                 source_headers = cells
@@ -253,9 +278,14 @@ def migrate_md_columns(year=DEFAULT_YEAR):
 
         if table_header_seen and stripped.startswith("|") and not stripped.startswith("| :---"):
             cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-            if len(cells) in (len(HEADERS), len(OLD_HEADERS), len(AVG_HEADERS)):
+            if len(cells) in (
+                len(HEADERS),
+                len(PREVIOUS_HEADERS),
+                len(LEGACY_HEADERS),
+                len(AVG_HEADERS),
+            ):
                 original_cells = cells.copy()
-                updated_cells = normalize_record_cells(cells, source_headers)
+                updated_cells = normalize_record_cells(cells, source_headers, year)
                 migrated_lines.append("| " + " | ".join(updated_cells) + " |")
                 changed = changed or updated_cells != original_cells
                 continue
@@ -400,13 +430,11 @@ def parse_markdown_records(year=DEFAULT_YEAR):
             continue
 
         cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-        if cells in (HEADERS, OLD_HEADERS, AVG_HEADERS):
+        if cells in (HEADERS, PREVIOUS_HEADERS, LEGACY_HEADERS, OLD_HEADERS, AVG_HEADERS):
             source_headers = cells
             continue
-        if len(cells) == len(OLD_HEADERS):
-            cells = normalize_record_cells(cells, source_headers)
-        elif len(cells) == len(AVG_HEADERS):
-            cells = normalize_record_cells(cells, source_headers)
+        if len(cells) in (len(PREVIOUS_HEADERS), len(LEGACY_HEADERS), len(AVG_HEADERS)):
+            cells = normalize_record_cells(cells, source_headers, year)
         if len(cells) != len(HEADERS):
             malformed_count += 1
             continue
@@ -552,7 +580,7 @@ class HotelManagerApp:
             text_pad = CELL_TEXT_PAD
             if header_name == "积分":
                 text_pad = POINTS_TEXT_PAD
-            elif header_name == "备注":
+            elif header_name in ("开业信息", "备注"):
                 text_pad = NOTE_TEXT_PAD
             measured_width = max(
                 header_font.measure(header_name),
@@ -628,6 +656,8 @@ class HotelManagerApp:
             "房型": clean_markdown_cell(self.entries["房型"].get()),
             "总价": clean_markdown_cell(self.entries["总价"].get()),
             "积分": points,
+            "开业信息": clean_markdown_cell(self.entries["开业信息"].get()),
+            "版本": clean_markdown_cell(self.entries["版本"].get()),
             "备注": clean_markdown_cell(self.entries["备注"].get()),
         }, None
 
@@ -967,6 +997,13 @@ class HotelManagerApp:
         self.add_field(form, row, "总价")
         row += 1
         self.add_field(form, row, "积分")
+        row += 1
+
+        self.add_section_label(form, "其他信息", row)
+        row += 1
+        self.add_field(form, row, "开业信息")
+        row += 1
+        self.add_field(form, row, "版本")
         row += 1
 
         self.add_section_label(form, "备注", row)
