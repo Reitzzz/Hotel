@@ -4,7 +4,6 @@ import os
 import re
 import sys
 import tempfile
-from calendar import monthrange
 from datetime import date
 from pathlib import Path
 
@@ -35,9 +34,9 @@ BASE_DIR = WORKSPACE_DIR / "data"
 AUTO_BACKUP_DIR = WORKSPACE_DIR / "data_backups" / "autosave"
 LEGACY_DATA_DIRS = tuple(dict.fromkeys((RUNTIME_DIR, SOURCE_DIR, WORKSPACE_DIR)))
 RECORD_FILE_PREFIX = "hotel_stay_records"
-DEFAULT_YEAR = "2025"
 FIRST_RECORD_YEAR = "2024"
 CURRENT_YEAR = str(date.today().year)
+DEFAULT_YEAR = CURRENT_YEAR
 
 HEADERS = ["名称", "入住时间", "间夜", "房型", "总价", "积分", "开业信息", "版本", "备注"]
 PREVIOUS_HEADERS = ["名称", "入住时间", "间夜", "房型", "总价", "积分", "开业信息", "备注"]
@@ -306,10 +305,7 @@ def clean_markdown_cell(value):
 def parse_month_day(value):
     if not DATE_PART_RE.match(value):
         return None
-    month, day = (int(part) for part in value.split(".", 1))
-    if not is_valid_month_day(month, day):
-        return None
-    return month, day
+    return tuple(int(part) for part in value.split(".", 1))
 
 
 def parse_stay_date_range(value):
@@ -335,13 +331,31 @@ def sort_records_by_checkin(records):
     return sorted(records, key=stay_date_sort_key)
 
 
-def is_valid_month_day(month, day):
-    if month < 1 or month > 12:
-        return False
-    return 1 <= day <= monthrange(2000, month)[1]
+def resolve_stay_dates(stay_range, year):
+    parsed = parse_stay_date_range(stay_range)
+    if parsed is None:
+        return None, "入住时间格式应为 1.16-1.18、8.29-9.2 或 12.30-1.2。"
+
+    try:
+        start_year = int(year)
+    except (TypeError, ValueError):
+        return None, "入住年份无效。"
+
+    start_month, start_day, end_month, end_day = parsed
+    end_year = start_year + 1 if end_month < start_month else start_year
+    try:
+        start_date = date(start_year, start_month, start_day)
+        end_date = date(end_year, end_month, end_day)
+    except ValueError:
+        return None, "入住时间包含无效的月份或日期。"
+
+    if end_date <= start_date:
+        return None, "退房日期应晚于入住日期。"
+
+    return (start_date, end_date), None
 
 
-def build_stay_date_range(checkin, checkout):
+def build_stay_date_range(checkin, checkout, year):
     checkin = clean_markdown_cell(checkin)
     checkout = clean_markdown_cell(checkout)
     if not checkin:
@@ -354,21 +368,18 @@ def build_stay_date_range(checkin, checkout):
         return None, "离店时间格式应为 1.18 或 10.3。"
 
     stay_range = f"{checkin}-{checkout}"
-    date_error = validate_stay_date_range(stay_range)
+    date_error = validate_stay_date_range(stay_range, year)
     if date_error:
         return None, date_error
     return stay_range, None
 
 
-def calculate_nights(stay_range):
-    parsed = parse_stay_date_range(stay_range)
-    if parsed is None:
+def calculate_nights(stay_range, year):
+    resolved_dates, date_error = resolve_stay_dates(stay_range, year)
+    if date_error:
         return ""
-    start_month, start_day, end_month, end_day = parsed
-    start_ordinal = date(2000, start_month, start_day).toordinal()
-    end_year = 2001 if end_month < start_month else 2000
-    end_ordinal = date(end_year, end_month, end_day).toordinal()
-    return f"{end_ordinal - start_ordinal}间夜"
+    start_date, end_date = resolved_dates
+    return f"{(end_date - start_date).days}间夜"
 
 
 def split_stay_date_range(stay_range):
@@ -377,30 +388,17 @@ def split_stay_date_range(stay_range):
     return stay_range.split("-", 1)
 
 
-def validate_stay_date_range(value):
-    parsed = parse_stay_date_range(value)
-    if parsed is None:
-        return "入住时间格式应为 1.16-1.18、8.29-9.2 或 12.30-1.2。"
-
-    start_month, start_day, end_month, end_day = parsed
-    if not is_valid_month_day(start_month, start_day) or not is_valid_month_day(end_month, end_day):
-        return "入住时间包含无效的月份或日期。"
-
-    start_ordinal = date(2000, start_month, start_day).toordinal()
-    end_year = 2001 if end_month < start_month else 2000
-    end_ordinal = date(end_year, end_month, end_day).toordinal()
-    if end_ordinal <= start_ordinal:
-        return "退房日期应晚于入住日期。"
-
-    return None
+def validate_stay_date_range(value, year):
+    _, date_error = resolve_stay_dates(value, year)
+    return date_error
 
 
-def validate_record(record):
+def validate_record(record, year):
     if not record["名称"]:
         return "名称为必填项。"
     if not record["入住时间"]:
         return "入住时间为必填项。"
-    date_error = validate_stay_date_range(record["入住时间"])
+    date_error = validate_stay_date_range(record["入住时间"], year)
     if date_error:
         return date_error
     if record["间夜"] and not NIGHTS_RE.match(record["间夜"]):
@@ -464,12 +462,27 @@ def has_duplicate_record(records, record, exclude_index=None):
     )
 
 
+def resolve_record_index(records, snapshot, preferred_index):
+    if snapshot is None:
+        return None
+    if 0 <= preferred_index < len(records) and records[preferred_index] == snapshot:
+        return preferred_index
+
+    matching_indices = [
+        index for index, record in enumerate(records) if record == snapshot
+    ]
+    if len(matching_indices) == 1:
+        return matching_indices[0]
+    return None
+
+
 class HotelManagerApp:
     def __init__(self, root):
         self.root = root
         self.column_layout = copy.deepcopy(BASE_COLUMN_LAYOUT)
         self.displayed_records = []
         self.editing_index = None
+        self.editing_record_snapshot = None
         self.entries = {}
 
         self.configure_styles()
@@ -641,10 +654,12 @@ class HotelManagerApp:
             self.record_table.column(header_name, width=width, minwidth=24, stretch=False)
 
     def collect_record(self):
+        year = self.selected_year()
         points = clean_markdown_cell(self.entries["积分"].get()) or "/"
         stay_range, date_error = build_stay_date_range(
             self.entries["入住时间"].get(),
             self.entries["离店时间"].get(),
+            year,
         )
         if date_error:
             return None, date_error
@@ -652,7 +667,7 @@ class HotelManagerApp:
         return {
             "名称": clean_markdown_cell(self.entries["名称"].get()),
             "入住时间": stay_range,
-            "间夜": calculate_nights(stay_range),
+            "间夜": calculate_nights(stay_range, year),
             "房型": clean_markdown_cell(self.entries["房型"].get()),
             "总价": clean_markdown_cell(self.entries["总价"].get()),
             "积分": points,
@@ -678,6 +693,7 @@ class HotelManagerApp:
 
     def enter_add_mode(self, clear_form=True):
         self.editing_index = None
+        self.editing_record_snapshot = None
         self.form_title_var.set("新增住宿记录")
         self.form_subtitle_var.set("录入一次住宿，自动写入 Markdown 笔记。")
         self.submit_button.configure(text="添加记录到 Markdown")
@@ -692,12 +708,33 @@ class HotelManagerApp:
             return
 
         self.editing_index = record_index
+        self.editing_record_snapshot = self.displayed_records[record_index].copy()
         self.form_title_var.set("编辑住宿记录")
         self.form_subtitle_var.set("修改选中记录，保存后更新 Markdown。")
         self.submit_button.configure(text="保存修改到 Markdown")
         self.delete_button.configure(state=tk.NORMAL)
         self.fill_entries(self.displayed_records[record_index])
         self.entries["名称"].focus_set()
+
+    def resolve_editing_record_index(self, records):
+        resolved_index = resolve_record_index(
+            records,
+            self.editing_record_snapshot,
+            self.editing_index,
+        )
+        if resolved_index is not None:
+            self.editing_index = resolved_index
+            return resolved_index
+
+        message = (
+            "数据文件已在外部发生变化，无法安全确认原记录。\n\n"
+            "为避免覆盖其他记录，本次操作已取消。请重新选择记录后重试。"
+        )
+        self.enter_add_mode()
+        self.refresh_table()
+        self.set_status("数据文件已变化，请重新选择记录。", "warning")
+        messagebox.showwarning("记录已变化", message)
+        return None
 
     def confirm_duplicate(self, records, record, exclude_index=None):
         if not has_duplicate_record(records, record, exclude_index):
@@ -714,7 +751,7 @@ class HotelManagerApp:
 
     def add_record(self):
         record, form_error = self.collect_record()
-        validation_error = form_error or validate_record(record)
+        validation_error = form_error or validate_record(record, self.selected_year())
         if validation_error:
             self.set_status(validation_error, "danger")
             messagebox.showerror("错误", validation_error)
@@ -744,7 +781,7 @@ class HotelManagerApp:
             return
 
         record, form_error = self.collect_record()
-        validation_error = form_error or validate_record(record)
+        validation_error = form_error or validate_record(record, self.selected_year())
         if validation_error:
             self.set_status(validation_error, "danger")
             messagebox.showerror("错误", validation_error)
@@ -757,18 +794,14 @@ class HotelManagerApp:
         if not self.ensure_records_writable(malformed_count):
             return
 
-        if self.editing_index < 0 or self.editing_index >= len(records):
-            message = "选中的记录已经不存在，请重新选择。"
-            self.set_status(message, "warning")
-            messagebox.showwarning("记录不存在", message)
-            self.enter_add_mode()
-            self.refresh_table()
+        resolved_index = self.resolve_editing_record_index(records)
+        if resolved_index is None:
             return
 
-        if not self.confirm_duplicate(records, record, self.editing_index):
+        if not self.confirm_duplicate(records, record, resolved_index):
             return
 
-        records[self.editing_index] = record
+        records[resolved_index] = record
         records = sort_records_by_checkin(records)
         saved_index = next(
             index for index, saved_record in enumerate(records) if saved_record is record
@@ -796,21 +829,17 @@ class HotelManagerApp:
         records, malformed_count = loaded
         if not self.ensure_records_writable(malformed_count):
             return
-        if self.editing_index < 0 or self.editing_index >= len(records):
-            message = "选中的记录已经不存在，请重新选择。"
-            self.set_status(message, "warning")
-            messagebox.showwarning("记录不存在", message)
-            self.enter_add_mode()
-            self.refresh_table()
+        resolved_index = self.resolve_editing_record_index(records)
+        if resolved_index is None:
             return
 
-        record = records[self.editing_index]
+        record = records[resolved_index]
         message = f"确定删除“{record['名称']} / {record['入住时间']}”这条记录吗？"
         if not messagebox.askyesno("删除记录", message):
             self.set_status("已取消删除。", "warning")
             return
 
-        del records[self.editing_index]
+        del records[resolved_index]
         if not self.save_records(records):
             return
 
