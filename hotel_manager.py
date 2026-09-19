@@ -55,6 +55,63 @@ TABLE_FONT = (FONT_FAMILY, 11)
 TABLE_HEADER_FONT = (FONT_FAMILY, 11, "bold")
 DEFAULT_WINDOW_SIZE = (1360, 760)
 LEFT_PANEL_WIDTH = 430
+FORM_ENTRY_WIDTH = 10
+# 布局密度：屏幕高度不够时（如 15.6 寸 1080p 笔记本 + 125% 缩放）逐级收紧间距和字号，
+# 保证左侧表单和"添加记录"按钮完整可见。
+LAYOUT_PROFILES = {
+    "comfortable": {
+        "outer_pad_y": 20,
+        "status_pad_y": 14,
+        "header_pad": (24, 8),
+        "form_pad": (6, 20),
+        "section_pad": (18, 5),
+        "field_pad": 6,
+        "entry_ipady": 2,
+        "hint_pad": 10,
+        "actions_pad": 18,
+        "button_pady": 11,
+        "title_size": 19,
+        "section_size": 10,
+        "body_size": 11,
+        "small_size": 10,
+        "button_size": 12,
+    },
+    "compact": {
+        "outer_pad_y": 12,
+        "status_pad_y": 8,
+        "header_pad": (14, 4),
+        "form_pad": (4, 12),
+        "section_pad": (10, 3),
+        "field_pad": 3,
+        "entry_ipady": 1,
+        "hint_pad": 6,
+        "actions_pad": 10,
+        "button_pady": 8,
+        "title_size": 17,
+        "section_size": 10,
+        "body_size": 11,
+        "small_size": 10,
+        "button_size": 12,
+    },
+    "dense": {
+        "outer_pad_y": 8,
+        "status_pad_y": 6,
+        "header_pad": (10, 2),
+        "form_pad": (2, 8),
+        "section_pad": (6, 2),
+        "field_pad": 2,
+        "entry_ipady": 0,
+        "hint_pad": 4,
+        "actions_pad": 6,
+        "button_pady": 6,
+        "title_size": 15,
+        "section_size": 9,
+        "body_size": 10,
+        "small_size": 9,
+        "button_size": 11,
+    },
+}
+LAYOUT_PROFILE_ORDER = ("comfortable", "compact", "dense")
 OUTER_PAD_X = 20
 PANEL_GAP = 12
 RIGHT_PANEL_PAD_X = 24
@@ -195,6 +252,45 @@ def enable_high_dpi():
             ctypes.windll.user32.SetProcessDPIAware()
         except (AttributeError, OSError):
             pass
+
+
+def get_work_area_size(root):
+    """返回主显示器去掉任务栏后的可用区域尺寸（像素）。"""
+    if sys.platform == "win32":
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        rect = RECT()
+        try:
+            if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                width = rect.right - rect.left
+                height = rect.bottom - rect.top
+                if width > 0 and height > 0:
+                    return width, height
+        except (AttributeError, OSError):
+            pass
+    return root.winfo_screenwidth(), max(root.winfo_screenheight() - 80, 240)
+
+
+def get_window_frame_size(root):
+    """返回窗口边框 + 标题栏占用的像素（宽方向合计，高方向合计）。"""
+    if sys.platform == "win32":
+        try:
+            metric = ctypes.windll.user32.GetSystemMetrics
+            padded_border = metric(92)
+            frame_width = 2 * (metric(32) + padded_border)
+            frame_height = metric(4) + 2 * (metric(33) + padded_border)
+            if frame_height > 0:
+                return frame_width, frame_height
+        except (AttributeError, OSError):
+            pass
+    scale = max(root.winfo_fpixels("1i") / 96.0, 1.0)
+    return int(16 * scale), int(48 * scale)
 
 
 def init_md_file(year=DEFAULT_YEAR):
@@ -484,6 +580,9 @@ class HotelManagerApp:
         self.editing_index = None
         self.editing_record_snapshot = None
         self.entries = {}
+        self.layout_profile = None
+        self.window_placed = False
+        self.layout_widgets = {"section_labels": [], "fields": [], "buttons": []}
 
         self.configure_styles()
         self.left_panel, self.right_panel = self.build_shell()
@@ -491,8 +590,10 @@ class HotelManagerApp:
         self.build_form_panel(self.left_panel)
         self.build_table_panel(self.right_panel)
 
+        self.fit_layout_to_screen()
         self.apply_window_air_wall()
         self.refresh_table()
+        self.place_window_on_screen()
         self.entries["名称"].focus_set()
 
     def selected_year(self):
@@ -931,15 +1032,16 @@ class HotelManagerApp:
     def build_shell(self):
         self.root.title("酒店住宿数据录入器")
         self.root.geometry(f"{DEFAULT_WINDOW_SIZE[0]}x{DEFAULT_WINDOW_SIZE[1]}")
-        self.root.columnconfigure(0, weight=0)
+        # 左列用 minsize 固定宽度，而不是 grid_propagate(False)：
+        # 后者会让左面板汇报的所需高度恒为 1，导致窗口最小高度完全不考虑表单内容，
+        # 在小屏幕上"添加记录"按钮被裁掉。
+        self.root.columnconfigure(0, weight=0, minsize=LEFT_PANEL_WIDTH + OUTER_PAD_X + PANEL_GAP)
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=0)
 
         left_panel = tk.Frame(self.root, bg=COLORS["panel"], bd=0, highlightthickness=1, highlightbackground=COLORS["line"])
-        left_panel.grid(row=0, column=0, sticky="ns", padx=(OUTER_PAD_X, PANEL_GAP), pady=20)
-        left_panel.grid_propagate(False)
-        left_panel.configure(width=LEFT_PANEL_WIDTH)
+        left_panel.grid(row=0, column=0, sticky="nsew", padx=(OUTER_PAD_X, PANEL_GAP), pady=20)
 
         right_panel = tk.Frame(self.root, bg=COLORS["panel"], bd=0, highlightthickness=1, highlightbackground=COLORS["line"])
         right_panel.grid(row=0, column=1, sticky="nsew", padx=(0, OUTER_PAD_X), pady=20)
@@ -958,6 +1060,7 @@ class HotelManagerApp:
             anchor="w",
         )
         label.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(18, 5))
+        self.layout_widgets["section_labels"].append(label)
 
     def add_field(self, parent, row, label_text, required=False):
         label = tk.Label(
@@ -970,18 +1073,19 @@ class HotelManagerApp:
         )
         label.grid(row=row, column=0, sticky="w", pady=6)
 
-        entry = ttk.Entry(parent, style="App.TEntry", font=BODY_FONT)
+        entry = ttk.Entry(parent, style="App.TEntry", font=BODY_FONT, width=FORM_ENTRY_WIDTH)
         entry.grid(row=row, column=1, sticky="ew", pady=6, padx=(14, 0), ipady=2)
         self.entries[label_text] = entry
+        self.layout_widgets["fields"].append((label, entry, required))
         return entry
 
     def build_form_panel(self, parent):
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(1, weight=1)
-
+        # 左面板用 pack：先放标题、再把按钮区固定在底部、最后表单填充剩余空间。
+        # 这样即使窗口高度实在不够，被裁掉的也是表单末尾而不是"添加记录"按钮。
         header = tk.Frame(parent, bg=COLORS["panel"])
-        header.grid(row=0, column=0, sticky="ew", padx=24, pady=(24, 8))
+        header.pack(side=tk.TOP, fill=tk.X, padx=24, pady=(24, 8))
         header.columnconfigure(0, weight=1)
+        self.layout_widgets["header"] = header
 
         self.form_title_var = tk.StringVar(value="新增住宿记录")
         title = tk.Label(
@@ -993,6 +1097,7 @@ class HotelManagerApp:
             anchor="w",
         )
         title.grid(row=0, column=0, sticky="ew")
+        self.layout_widgets["title"] = title
 
         self.form_subtitle_var = tk.StringVar(value="录入一次住宿，自动写入 Markdown 笔记。")
         subtitle = tk.Label(
@@ -1004,10 +1109,18 @@ class HotelManagerApp:
             anchor="w",
         )
         subtitle.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.layout_widgets["subtitle"] = subtitle
+
+        actions = tk.Frame(parent, bg=COLORS["panel"])
+        actions.pack(side=tk.BOTTOM, fill=tk.X, padx=24, pady=(18, 20))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=0)
+        self.layout_widgets["actions"] = actions
 
         form = tk.Frame(parent, bg=COLORS["panel"])
-        form.grid(row=1, column=0, sticky="nsew", padx=24, pady=(6, 20))
+        form.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=24, pady=(6, 0))
         form.columnconfigure(1, weight=1)
+        self.layout_widgets["form"] = form
 
         row = 0
         self.add_section_label(form, "基础信息", row)
@@ -1049,12 +1162,7 @@ class HotelManagerApp:
             anchor="w",
         )
         hint.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(10, 0))
-        row += 1
-
-        actions = tk.Frame(form, bg=COLORS["panel"])
-        actions.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(18, 0))
-        actions.columnconfigure(0, weight=1)
-        actions.columnconfigure(1, weight=0)
+        self.layout_widgets["hint"] = hint
 
         self.submit_button = tk.Button(
             actions,
@@ -1074,6 +1182,7 @@ class HotelManagerApp:
         self.submit_button.grid(row=0, column=0, sticky="ew")
         self.submit_button.bind("<Enter>", lambda _event: self.submit_button.configure(bg=COLORS["accent_hover"]))
         self.submit_button.bind("<Leave>", lambda _event: self.submit_button.configure(bg=COLORS["accent"]))
+        self.layout_widgets["buttons"].append(self.submit_button)
 
         self.delete_button = tk.Button(
             actions,
@@ -1092,6 +1201,7 @@ class HotelManagerApp:
             state=tk.DISABLED,
         )
         self.delete_button.grid(row=0, column=1, sticky="e", padx=(10, 0))
+        self.layout_widgets["buttons"].append(self.delete_button)
 
     def build_table_panel(self, parent):
         header = tk.Frame(parent, bg=COLORS["panel"])
@@ -1225,33 +1335,128 @@ class HotelManagerApp:
             + RIGHT_PANEL_PAD_X * 2
             + RIGHT_PANEL_BORDER
         )
+        left_width = max(LEFT_PANEL_WIDTH, self.left_panel.winfo_reqwidth())
         min_width = (
-            LEFT_PANEL_WIDTH
+            left_width
             + right_min_width
             + OUTER_PAD_X * 2
             + PANEL_GAP
             + AIR_WALL_EXTRA_WIDTH
         )
 
+        profile = LAYOUT_PROFILES[self.layout_profile or LAYOUT_PROFILE_ORDER[0]]
         content_height = max(self.left_panel.winfo_reqheight(), self.right_panel.winfo_reqheight())
         status_height = self.status_label.winfo_reqheight()
-        min_height = content_height + status_height + 20 * 2 + 14 + AIR_WALL_EXTRA_HEIGHT
+        min_height = (
+            content_height
+            + status_height
+            + profile["outer_pad_y"] * 2
+            + profile["status_pad_y"]
+            + AIR_WALL_EXTRA_HEIGHT
+        )
 
         return int(min_width), int(min_height)
 
+    def max_client_size(self):
+        """当前屏幕上窗口客户区最大可用尺寸（扣除任务栏和标题栏）。"""
+        work_width, work_height = get_work_area_size(self.root)
+        frame_width, frame_height = get_window_frame_size(self.root)
+        return max(work_width - frame_width, 320), max(work_height - frame_height, 240)
+
+    def apply_layout_profile(self, name):
+        profile = LAYOUT_PROFILES[name]
+        self.layout_profile = name
+        widgets = self.layout_widgets
+
+        self.left_panel.grid_configure(pady=profile["outer_pad_y"])
+        self.right_panel.grid_configure(pady=profile["outer_pad_y"])
+        widgets["status_frame"].grid_configure(pady=(0, profile["status_pad_y"]))
+
+        widgets["header"].pack_configure(pady=profile["header_pad"])
+        widgets["form"].pack_configure(pady=(profile["form_pad"][0], 0))
+        widgets["actions"].pack_configure(pady=(profile["actions_pad"], profile["form_pad"][1]))
+
+        widgets["title"].configure(font=(FONT_FAMILY, profile["title_size"], "bold"))
+        widgets["subtitle"].configure(font=(FONT_FAMILY, profile["small_size"]))
+        widgets["hint"].configure(font=(FONT_FAMILY, profile["small_size"]))
+        widgets["hint"].grid_configure(pady=(profile["hint_pad"], 0))
+
+        for label in widgets["section_labels"]:
+            label.configure(font=(FONT_FAMILY, profile["section_size"], "bold"))
+            label.grid_configure(pady=profile["section_pad"])
+
+        for label, entry, required in widgets["fields"]:
+            label.configure(font=(FONT_FAMILY, profile["body_size"], "bold" if required else "normal"))
+            label.grid_configure(pady=profile["field_pad"])
+            entry.configure(font=(FONT_FAMILY, profile["body_size"]))
+            entry.grid_configure(pady=profile["field_pad"], ipady=profile["entry_ipady"])
+
+        for button in widgets["buttons"]:
+            button.configure(pady=profile["button_pady"], font=(FONT_FAMILY, profile["button_size"], "bold"))
+
+    def fit_layout_to_screen(self):
+        """按屏幕可用高度选择最宽松但仍放得下的布局密度。"""
+        _, max_height = self.max_client_size()
+        for name in LAYOUT_PROFILE_ORDER:
+            self.apply_layout_profile(name)
+            _, min_height = self.calculate_window_min_size()
+            if min_height <= max_height:
+                break
+
     def apply_window_air_wall(self):
         min_width, min_height = self.calculate_window_min_size()
+        max_width, max_height = self.max_client_size()
+        # 最小尺寸不能超过屏幕，否则窗口会被推到屏幕外面
+        min_width = min(min_width, max_width)
+        min_height = min(min_height, max_height)
         self.root.minsize(min_width, min_height)
 
-        current_width = max(self.root.winfo_width(), DEFAULT_WINDOW_SIZE[0], min_width)
-        current_height = max(self.root.winfo_height(), DEFAULT_WINDOW_SIZE[1], min_height)
+        if self.root.state() == "zoomed":
+            self.root.update_idletasks()
+            return
+
+        current_width = min(max(self.root.winfo_width(), DEFAULT_WINDOW_SIZE[0], min_width), max_width)
+        current_height = min(max(self.root.winfo_height(), DEFAULT_WINDOW_SIZE[1], min_height), max_height)
         self.root.geometry(f"{current_width}x{current_height}")
         self.root.update_idletasks()
+        if self.window_placed:
+            self.keep_window_on_screen()
+
+    def clamp_window_position(self, width, height, x, y):
+        work_width, work_height = get_work_area_size(self.root)
+        frame_width, frame_height = get_window_frame_size(self.root)
+        x = min(x, work_width - width - frame_width)
+        y = min(y, work_height - height - frame_height)
+        return max(x, 0), max(y, 0)
+
+    def keep_window_on_screen(self):
+        """窗口因内容变宽/变高后，若右边或底部超出屏幕，就往回挪。"""
+        if self.root.state() == "zoomed":
+            return
+        width, height = self.root.winfo_width(), self.root.winfo_height()
+        x, y = self.clamp_window_position(width, height, self.root.winfo_x(), self.root.winfo_y())
+        if (x, y) != (self.root.winfo_x(), self.root.winfo_y()):
+            self.root.geometry(f"{width}x{height}+{x}+{y}")
+            self.root.update_idletasks()
+
+    def place_window_on_screen(self):
+        """首次显示时把窗口放在工作区中央，避免大窗口默认位置把底部顶出屏幕。"""
+        self.root.update_idletasks()
+        work_width, work_height = get_work_area_size(self.root)
+        frame_width, frame_height = get_window_frame_size(self.root)
+        width, height = self.root.winfo_width(), self.root.winfo_height()
+        x = (work_width - width - frame_width) // 2
+        y = (work_height - height - frame_height) // 2
+        x, y = self.clamp_window_position(width, height, x, y)
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+        self.root.update_idletasks()
+        self.window_placed = True
 
     def build_status_bar(self):
         status_frame = tk.Frame(self.root, bg=COLORS["app_bg"])
         status_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=20, pady=(0, 14))
         status_frame.columnconfigure(0, weight=1)
+        self.layout_widgets["status_frame"] = status_frame
 
         self.status_var = tk.StringVar(value="")
         self.status_label = tk.Label(
