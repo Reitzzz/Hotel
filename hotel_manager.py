@@ -116,7 +116,6 @@ OUTER_PAD_X = 20
 PANEL_GAP = 12
 RIGHT_PANEL_PAD_X = 24
 RIGHT_PANEL_BORDER = 2
-TABLE_SCROLLBAR_WIDTH = 22
 AIR_WALL_EXTRA_WIDTH = 16
 AIR_WALL_EXTRA_HEIGHT = 24
 CELL_TEXT_PAD = 34
@@ -714,7 +713,7 @@ class HotelManagerApp:
         if event is not None and event.widget is not self.table_wrap:
             return
 
-        available_width = self.table_wrap.winfo_width() - TABLE_SCROLLBAR_WIDTH
+        available_width = self.table_wrap.winfo_width() - 2 * self.table_wrap.cget("highlightthickness")
         if available_width <= 120:
             return
 
@@ -1027,13 +1026,6 @@ class HotelManagerApp:
             padding=(8, 10),
         )
         style.map("Records.Treeview", background=[("selected", COLORS["accent"])])
-        style.configure(
-            "App.Vertical.TScrollbar",
-            background=COLORS["panel_alt"],
-            troughcolor="#ffffff",
-            bordercolor=COLORS["line_soft"],
-            arrowcolor=COLORS["muted"],
-        )
 
     def build_shell(self):
         self.root.title("酒店住宿数据录入器")
@@ -1297,14 +1289,6 @@ class HotelManagerApp:
         self.table_wrap.rowconfigure(0, weight=1)
 
         self.record_table = ttk.Treeview(self.table_wrap, columns=HEADERS, show="headings", selectmode="browse", style="Records.Treeview")
-        scrollbar = ttk.Scrollbar(
-            self.table_wrap,
-            orient=tk.VERTICAL,
-            command=self.record_table.yview,
-            style="App.Vertical.TScrollbar",
-        )
-        self.record_table.configure(yscrollcommand=scrollbar.set)
-
         for header_name in HEADERS:
             self.record_table.heading(header_name, text=header_name)
             self.record_table.column(
@@ -1318,7 +1302,6 @@ class HotelManagerApp:
         self.record_table.tag_configure("even", background="#ffffff")
         self.record_table.tag_configure("odd", background=COLORS["panel_alt"])
         self.record_table.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
         self.table_wrap.bind("<Configure>", self.resize_table_columns)
         self.record_table.bind("<<TreeviewSelect>>", self.handle_table_selection)
         self.record_table.bind("<ButtonRelease-1>", self.handle_table_click)
@@ -1338,7 +1321,6 @@ class HotelManagerApp:
         table_min_width = sum(spec["min"] for spec in self.column_layout.values())
         right_min_width = (
             table_min_width
-            + TABLE_SCROLLBAR_WIDTH
             + RIGHT_PANEL_PAD_X * 2
             + RIGHT_PANEL_BORDER
         )
