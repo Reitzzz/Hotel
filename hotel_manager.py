@@ -801,7 +801,7 @@ class HotelManagerApp:
             self.clear_entries()
         self.entries["名称"].focus_set()
 
-    def enter_edit_mode(self, record_index):
+    def enter_edit_mode(self, record_index, focus_form=True):
         if record_index < 0 or record_index >= len(self.displayed_records):
             self.enter_add_mode()
             return
@@ -813,7 +813,8 @@ class HotelManagerApp:
         self.submit_button.configure(text="保存修改到 Markdown")
         self.delete_button.configure(state=tk.NORMAL)
         self.fill_entries(self.displayed_records[record_index])
-        self.entries["名称"].focus_set()
+        if focus_form:
+            self.entries["名称"].focus_set()
 
     def resolve_editing_record_index(self, records):
         resolved_index = resolve_record_index(
@@ -951,6 +952,13 @@ class HotelManagerApp:
             self.add_record()
         else:
             self.edit_record()
+
+    def handle_table_selection(self, _event):
+        selected = self.record_table.selection()
+        if selected:
+            record_index = self.record_table.index(selected[0])
+            if record_index != self.editing_index:
+                self.enter_edit_mode(record_index, focus_form=False)
 
     def handle_table_click(self, event):
         row_id = self.record_table.identify_row(event.y)
@@ -1288,7 +1296,7 @@ class HotelManagerApp:
         self.table_wrap.columnconfigure(0, weight=1)
         self.table_wrap.rowconfigure(0, weight=1)
 
-        self.record_table = ttk.Treeview(self.table_wrap, columns=HEADERS, show="headings", style="Records.Treeview")
+        self.record_table = ttk.Treeview(self.table_wrap, columns=HEADERS, show="headings", selectmode="browse", style="Records.Treeview")
         scrollbar = ttk.Scrollbar(
             self.table_wrap,
             orient=tk.VERTICAL,
@@ -1312,6 +1320,7 @@ class HotelManagerApp:
         self.record_table.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.table_wrap.bind("<Configure>", self.resize_table_columns)
+        self.record_table.bind("<<TreeviewSelect>>", self.handle_table_selection)
         self.record_table.bind("<ButtonRelease-1>", self.handle_table_click)
 
         self.empty_state = tk.Label(
