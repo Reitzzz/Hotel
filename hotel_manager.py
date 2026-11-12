@@ -373,12 +373,10 @@ def migrate_md_columns(year=DEFAULT_YEAR):
 
         if table_header_seen and stripped.startswith("|") and not stripped.startswith("| :---"):
             cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-            if len(cells) in (
-                len(HEADERS),
-                len(PREVIOUS_HEADERS),
-                len(LEGACY_HEADERS),
-                len(AVG_HEADERS),
-            ):
+            # 异常行交给解析器报告，避免迁移表头后掩盖原来的列数错误。
+            if len(cells) != len(source_headers):
+                return
+            if source_headers != HEADERS:
                 original_cells = cells.copy()
                 updated_cells = normalize_record_cells(cells, source_headers, year)
                 migrated_lines.append("| " + " | ".join(updated_cells) + " |")
@@ -520,18 +518,18 @@ def parse_markdown_records(year=DEFAULT_YEAR):
         stripped = line.strip()
         if not stripped or not stripped.startswith("|"):
             continue
-        if stripped.startswith("| :---") or stripped == "| " + " | ".join(HEADERS) + " |":
+        if stripped.startswith("| :---"):
             continue
 
         cells = [cell.strip() for cell in stripped.strip("|").split("|")]
         if cells in (HEADERS, PREVIOUS_HEADERS, LEGACY_HEADERS, OLD_HEADERS, AVG_HEADERS):
             source_headers = cells
             continue
-        if len(cells) in (len(PREVIOUS_HEADERS), len(LEGACY_HEADERS), len(AVG_HEADERS)):
-            cells = normalize_record_cells(cells, source_headers, year)
-        if len(cells) != len(HEADERS):
+        if len(cells) != len(source_headers):
             malformed_count += 1
             continue
+        if source_headers != HEADERS:
+            cells = normalize_record_cells(cells, source_headers, year)
         records.append(dict(zip(HEADERS, cells)))
 
     return sort_records_by_checkin(records), malformed_count
