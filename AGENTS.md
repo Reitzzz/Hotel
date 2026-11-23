@@ -32,4 +32,3 @@
 - 上面的命令是 PowerShell 语法；如果在 Git Bash 中执行，distpath 要写成 `release/HotelManager`（正斜杠），
   否则 `\H` 被转义，产物会输出到错误的 `releaseHotelManager/` 目录。
 - 打包完成后删除工作区里的 `build/`、`HotelManagerWithIcon.spec`、`__pycache__/`，仓库不跟踪这些中间产物。
-- 打包产物 release/HotelManager/HotelManagerWithIcon.exe 需提交进仓库：改代码后重新打包并连同 exe 一起提交。
