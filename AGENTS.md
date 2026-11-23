@@ -1,8 +1,10 @@
 # 项目概况
 
-- 单文件 Tkinter 桌面应用：hotel_manager.py，仅用标准库，无 requirements.txt，无自动化测试。
+- 单文件 Tkinter 桌面应用：hotel_manager.py，仅用标准库，无 requirements.txt。
+- 表格与备注回归：`D:\Python\python.exe -B -X utf8 tests/test_table_notes.py -v`，使用真实 Tk 控件和临时数据目录，需要可用的桌面环境。
 - 修改代码后用 `D:\Python\python.exe hotel_manager.py` 启动 GUI 做冒烟验证。
 - 文件名 hotel_manager.py 是工作区定位标记（与 .git 一起被 find_workspace_dir 识别），不要改名，否则打包版会找不到 data/ 目录。
+- 调整记录表列宽或备注交互前，阅读 [备注显示决策](.agents/notes/implemented/bug-fix/2026-11-23-table-note-visibility.md)，其中记录了用户不使用横向滚动条的约束。
 
 # Python 环境约定
 

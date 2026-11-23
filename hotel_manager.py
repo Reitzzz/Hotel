@@ -118,11 +118,7 @@ RIGHT_PANEL_PAD_X = 24
 RIGHT_PANEL_BORDER = 2
 AIR_WALL_EXTRA_WIDTH = 16
 AIR_WALL_EXTRA_HEIGHT = 24
-CELL_TEXT_PAD = 34
-POINTS_TEXT_PAD = 70
-NOTE_TEXT_PAD = 52
-NAME_EXTRA_CHARS = "空空空"
-ROOM_LIMIT_CHARS = "空空空空空空空空空空"
+CELL_TEXT_PAD = 18
 COLORS = {
     "app_bg": "#eef2f7",
     "panel": "#ffffff",
@@ -142,15 +138,15 @@ COLORS = {
 }
 
 BASE_COLUMN_LAYOUT = {
-    "名称": {"weight": 1.0, "min": 185, "max": 260, "anchor": "w"},
-    "入住时间": {"weight": 1.25, "min": 98, "max": 138, "anchor": "center"},
-    "间夜": {"weight": 0.55, "min": 62, "max": 78, "anchor": "center"},
-    "房型": {"weight": 0.85, "min": 105, "max": 170, "anchor": "center"},
-    "总价": {"weight": 0.7, "min": 64, "max": 92, "anchor": "center"},
-    "积分": {"weight": 1.35, "min": 135, "max": 210, "anchor": "center"},
-    "开业信息": {"weight": 1.2, "min": 120, "max": 210, "anchor": "center"},
-    "版本": {"weight": 0.7, "min": 72, "max": 120, "anchor": "center"},
-    "备注": {"weight": 1.35, "min": 120, "max": 210, "anchor": "center"},
+    "名称": {"min": 185, "max": 360, "anchor": "w"},
+    "入住时间": {"min": 98, "anchor": "center"},
+    "间夜": {"min": 56, "anchor": "center"},
+    "房型": {"min": 100, "anchor": "center"},
+    "总价": {"min": 56, "anchor": "center"},
+    "积分": {"min": 60, "anchor": "center"},
+    "开业信息": {"min": 84, "anchor": "center"},
+    "版本": {"min": 65, "anchor": "center"},
+    "备注": {"min": 150, "anchor": "w"},
 }
 
 
@@ -573,6 +569,7 @@ class HotelManagerApp:
     def __init__(self, root):
         self.root = root
         self.column_layout = copy.deepcopy(BASE_COLUMN_LAYOUT)
+        self.table_font = tkfont.Font(root=root, family=FONT_FAMILY, size=TABLE_FONT[1])
         self.displayed_records = []
         self.editing_index = None
         self.editing_record_snapshot = None
@@ -641,6 +638,7 @@ class HotelManagerApp:
     def refresh_table(self):
         for item_id in self.record_table.get_children():
             self.record_table.delete(item_id)
+        self.show_note_detail()
 
         loaded = self.load_records()
         if loaded is None:
@@ -656,6 +654,7 @@ class HotelManagerApp:
             tag = "even" if index % 2 == 0 else "odd"
             values = [record[header] for header in HEADERS]
             self.record_table.insert("", tk.END, values=values, tags=(tag,))
+        self.update_note_summaries()
 
         total_text = f"{len(records)} 条记录"
         if malformed_count:
@@ -676,80 +675,106 @@ class HotelManagerApp:
 
     def update_column_layout_from_records(self, records):
         layout = copy.deepcopy(BASE_COLUMN_LAYOUT)
-        table_font = tkfont.Font(root=self.root, family=FONT_FAMILY, size=TABLE_FONT[1])
         header_font = tkfont.Font(
             root=self.root,
             family=FONT_FAMILY,
             size=TABLE_HEADER_FONT[1],
             weight="bold",
         )
-        room_limit_width = table_font.measure(ROOM_LIMIT_CHARS) + CELL_TEXT_PAD
-        name_extra_width = table_font.measure(NAME_EXTRA_CHARS)
-
         for header_name in HEADERS:
-            values = [header_name] + [record[header_name] for record in records]
-            text_pad = CELL_TEXT_PAD
-            if header_name == "积分":
-                text_pad = POINTS_TEXT_PAD
-            elif header_name in ("开业信息", "备注"):
-                text_pad = NOTE_TEXT_PAD
-            measured_width = max(
-                header_font.measure(header_name),
-                *(table_font.measure(value) for value in values),
-            ) + text_pad
             spec = layout[header_name]
-            spec["min"] = max(spec["min"], measured_width)
-
+            header_width = header_font.measure(header_name) + CELL_TEXT_PAD
+            spec["floor"] = max(header_width, {"名称": 120, "备注": 96}.get(header_name, 0))
+            if header_name == "备注":
+                # 备注长度不再决定表格或窗口的最小宽度。
+                spec["min"] = max(spec["min"], spec["floor"])
+                continue
+            measured_width = max(
+                [header_width] + [self.table_font.measure(record[header_name]) + CELL_TEXT_PAD for record in records]
+            )
             if header_name == "名称":
-                spec["max"] = max(spec["max"], measured_width + name_extra_width)
-            elif header_name == "房型":
-                spec["max"] = max(spec["max"], room_limit_width, measured_width)
-            else:
-                spec["max"] = max(spec["max"], measured_width)
+                measured_width = min(measured_width, spec["max"])
+            spec["min"] = max(spec["floor"], measured_width)
 
         self.column_layout = layout
 
     def resize_table_columns(self, event=None):
-        if event is not None and event.widget is not self.table_wrap:
+        # clam 主题的 Treeview.field 左右各占 2 像素。
+        available_width = self.record_table.winfo_width() - 4
+        if available_width <= 120 or "floor" not in self.column_layout["备注"]:
             return
 
-        available_width = self.table_wrap.winfo_width() - 2 * self.table_wrap.cget("highlightthickness")
-        if available_width <= 120:
-            return
-
-        remaining_width = available_width
-        remaining_columns = set(self.column_layout)
         widths = {header_name: spec["min"] for header_name, spec in self.column_layout.items()}
-        remaining_width -= sum(widths.values())
-
-        if remaining_width <= 0:
-            for header_name, width in widths.items():
-                self.record_table.column(header_name, width=width, minwidth=24, stretch=False)
-            return
-
-        while remaining_width > 0 and remaining_columns:
-            total_weight = sum(self.column_layout[name]["weight"] for name in remaining_columns)
-            used_width = 0
-            capped_columns = set()
-
-            for header_name in remaining_columns:
-                spec = self.column_layout[header_name]
-                extra = max(1, int(remaining_width * spec["weight"] / total_weight))
-                candidate_width = widths[header_name] + extra
-                max_width = spec["max"]
-                if candidate_width >= max_width:
-                    extra = max_width - widths[header_name]
-                    capped_columns.add(header_name)
-                widths[header_name] += max(0, extra)
-                used_width += max(0, extra)
-
-            if used_width == 0:
+        # 先压缩长文本列，尽量保留日期、价格等短字段的完整宽度。
+        for columns in (("名称", "备注"), tuple(name for name in HEADERS if name not in ("名称", "备注"))):
+            overflow = sum(widths.values()) - available_width
+            if overflow <= 0:
                 break
-            remaining_width -= used_width
-            remaining_columns -= capped_columns
+            capacity = sum(widths[name] - self.column_layout[name]["floor"] for name in columns)
+            reduction = min(overflow, capacity)
+            for name in columns:
+                room = widths[name] - self.column_layout[name]["floor"]
+                shrink = reduction * room // capacity if capacity else 0
+                widths[name] -= shrink
+                reduction -= shrink
+                capacity -= room
+
+        if sum(widths.values()) > available_width:
+            # 屏幕极窄时仍保留所有列，不产生横向滚动区域。
+            total = sum(widths.values())
+            widths = {name: int(width * available_width / total) for name, width in widths.items()}
+        else:
+            spare = available_width - sum(widths.values())
+            widths["名称"] += min(spare // 3, self.column_layout["名称"]["max"] - widths["名称"])
+        widths["备注"] += available_width - sum(widths.values())
 
         for header_name, width in widths.items():
-            self.record_table.column(header_name, width=width, minwidth=24, stretch=False)
+            self.record_table.column(header_name, width=width, minwidth=1, stretch=False)
+        self.record_table.xview_moveto(0)
+        self.update_note_summaries()
+
+    def update_note_summaries(self):
+        available_width = max(0, self.record_table.column("备注", "width") - CELL_TEXT_PAD)
+        for item_id, record in zip(self.record_table.get_children(), self.displayed_records):
+            note = record["备注"]
+            summary = note
+            if self.table_font.measure(note) > available_width:
+                low, high = 0, len(note)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    if self.table_font.measure(note[:middle] + "…") <= available_width:
+                        low = middle
+                    else:
+                        high = middle - 1
+                summary = note[:low] + "…"
+            self.record_table.set(item_id, "备注", summary)
+
+    def show_note_detail(self, record=None):
+        note = record["备注"] if record is not None else ""
+        text = (note or "这条记录没有备注。") if record is not None else ""
+        self.note_detail.configure(state=tk.NORMAL, fg=COLORS["text"] if note else COLORS["muted"])
+        self.note_detail.delete("1.0", tk.END)
+        self.note_detail.insert("1.0", text)
+        self.note_detail.configure(state=tk.DISABLED)
+        self.note_detail.yview_moveto(0)
+        self.copy_note_button.configure(state=tk.NORMAL if note else tk.DISABLED)
+        if record is None:
+            self.note_detail_panel.grid_remove()
+            self.table_wrap.grid_configure(pady=(0, 24))
+            return
+        self.note_detail_panel.grid()
+        self.table_wrap.grid_configure(pady=(0, 12))
+        self.note_detail.after_idle(self.resize_note_detail)
+
+    def resize_note_detail(self, _event=None):
+        display_lines = self.note_detail.count("1.0", "end", "displaylines")[0]
+        self.note_detail.configure(height=max(2, min(5, display_lines)))
+        self.note_hint.configure(text="可用滚轮浏览全文" if display_lines > 5 else "可选中文字复制")
+
+    def copy_note(self):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.note_detail.get("1.0", "end-1c"))
+        self.set_status("完整备注已复制。", "success")
 
     def collect_record(self):
         year = self.selected_year()
@@ -796,6 +821,7 @@ class HotelManagerApp:
         self.form_subtitle_var.set("录入一次住宿，自动写入 Markdown 笔记。")
         self.submit_button.configure(text="添加记录到 Markdown")
         self.delete_button.configure(state=tk.DISABLED)
+        self.show_note_detail()
         if clear_form:
             self.clear_entries()
         self.entries["名称"].focus_set()
@@ -812,6 +838,7 @@ class HotelManagerApp:
         self.submit_button.configure(text="保存修改到 Markdown")
         self.delete_button.configure(state=tk.NORMAL)
         self.fill_entries(self.displayed_records[record_index])
+        self.show_note_detail(self.displayed_records[record_index])
         if focus_form:
             self.entries["名称"].focus_set()
 
@@ -958,6 +985,15 @@ class HotelManagerApp:
             record_index = self.record_table.index(selected[0])
             if record_index != self.editing_index:
                 self.enter_edit_mode(record_index, focus_form=False)
+            else:
+                self.show_note_detail(self.displayed_records[record_index])
+        else:
+            self.show_note_detail()
+
+    def handle_table_press(self, event):
+        # 列宽由可用空间统一分配，禁止拖宽某列后挤掉右侧备注。
+        if self.record_table.identify_region(event.x, event.y) == "separator":
+            return "break"
 
     def handle_table_click(self, event):
         row_id = self.record_table.identify_row(event.y)
@@ -966,7 +1002,7 @@ class HotelManagerApp:
         if row_id:
             self.record_table.selection_set(row_id)
             self.record_table.focus(row_id)
-            self.enter_edit_mode(self.record_table.index(row_id))
+            self.enter_edit_mode(self.record_table.index(row_id), focus_form=False)
         elif region == "nothing":
             self.record_table.selection_remove(self.record_table.selection())
             self.enter_add_mode()
@@ -1284,7 +1320,7 @@ class HotelManagerApp:
         subtitle.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
         self.table_wrap = tk.Frame(parent, bg=COLORS["panel"], highlightthickness=1, highlightbackground=COLORS["line"])
-        self.table_wrap.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 24))
+        self.table_wrap.grid(row=1, column=0, sticky="nsew", padx=24, pady=(0, 12))
         self.table_wrap.columnconfigure(0, weight=1)
         self.table_wrap.rowconfigure(0, weight=1)
 
@@ -1302,7 +1338,8 @@ class HotelManagerApp:
         self.record_table.tag_configure("even", background="#ffffff")
         self.record_table.tag_configure("odd", background=COLORS["panel_alt"])
         self.record_table.grid(row=0, column=0, sticky="nsew")
-        self.table_wrap.bind("<Configure>", self.resize_table_columns)
+        self.record_table.bind("<Configure>", self.resize_table_columns)
+        self.record_table.bind("<Button-1>", self.handle_table_press)
         self.record_table.bind("<<TreeviewSelect>>", self.handle_table_selection)
         self.record_table.bind("<ButtonRelease-1>", self.handle_table_click)
 
@@ -1314,6 +1351,35 @@ class HotelManagerApp:
             font=BODY_FONT,
             justify="center",
         )
+
+        detail_panel = tk.Frame(parent, bg=COLORS["panel_alt"], padx=12, pady=10)
+        self.note_detail_panel = detail_panel
+        detail_panel.grid(row=2, column=0, sticky="ew", padx=24, pady=(0, 24))
+        detail_panel.columnconfigure(1, weight=1)
+        tk.Label(
+            detail_panel, text="完整备注", bg=COLORS["panel_alt"], fg=COLORS["text"],
+            font=(FONT_FAMILY, 11, "bold"), anchor="w",
+        ).grid(row=0, column=0, sticky="w")
+        self.note_hint = tk.Label(
+            detail_panel, bg=COLORS["panel_alt"], fg=COLORS["muted"], font=SMALL_FONT,
+        )
+        self.note_hint.grid(row=0, column=1, sticky="w", padx=16)
+        self.copy_note_button = tk.Button(
+            detail_panel, text="复制备注", command=self.copy_note, state=tk.DISABLED,
+            bg=COLORS["accent_soft"], fg=COLORS["accent"], activebackground=COLORS["accent_soft"],
+            relief=tk.FLAT, bd=0, padx=10, pady=4, font=SMALL_FONT, cursor="hand2",
+        )
+        self.copy_note_button.grid(row=0, column=2, sticky="e")
+        self.note_detail = tk.Text(
+            detail_panel, height=2, width=1, wrap=tk.WORD, state=tk.DISABLED, takefocus=True,
+            font=BODY_FONT, bg=COLORS["panel_alt"], fg=COLORS["text"],
+            relief=tk.FLAT, bd=0, highlightthickness=1, highlightbackground=COLORS["panel_alt"],
+            highlightcolor=COLORS["accent"], padx=0, pady=6,
+            selectbackground=COLORS["accent"], selectforeground="white", exportselection=False,
+        )
+        self.note_detail.grid(row=1, column=0, columnspan=3, sticky="ew")
+        self.note_detail.bind("<Configure>", self.resize_note_detail)
+        self.show_note_detail()
 
     def calculate_window_min_size(self):
         self.root.update_idletasks()
