@@ -20,7 +20,7 @@ Status: implemented
 
 ## Existing note audit
 
-2026-11-23 检查仓库根目录及隐藏文件：仓库没有 `.agents/notes/` 或现有决策目录，因此没有 proposed、implemented、rejected 笔记需要合并或互链。历史快照与用户未提交的数据、HTML、PPTX 不属于本次修改范围。
+2026-11-23 检查仓库根目录及隐藏文件：仓库没有 `docs/decisions/` 或现有决策目录，因此没有 proposed、implemented、rejected 笔记需要合并或互链。历史快照与用户未提交的数据、HTML、PPTX 不属于本次修改范围。
 
 ## Alternatives considered
 
